@@ -324,8 +324,10 @@ public class KeyframeSmoothingPlugin extends Plugin
 		}
 
 		int length = info.frameLengths[frame];
-		double hold = 0;
-		double power = 1 + 0.8 * impact;
+		// every keyframe pose stays in view a moment, and the move into the next one slows down as it gets there
+		double hold = 0.3 * impact;
+		double power = 1 + impact;
+		boolean settle = true;
 		if (glitch)
 		{
 			// a big turn or jump in an action is mostly the strike itself: keep the pose, then whip into the next one
@@ -333,16 +335,19 @@ public class KeyframeSmoothingPlugin extends Plugin
 			// matter most, are walking, standing and objects: never blended above)
 			hold = Math.max(0, 1 - QUICK_TICKS / (double) length);
 			power = 2;
+			settle = false;
 		}
 		else if (letter == KeyframeTable.HOLD || letter == KeyframeTable.PUNCH && impact >= 0.6)
 		{
-			hold = (letter == KeyframeTable.HOLD ? 0.45 : 0.3) * impact;
+			// a pose the animation holds: stays longer, then speeds into the next one
+			hold = (letter == KeyframeTable.HOLD ? 0.5 : 0.4) * impact;
 			power = 1 + 1.6 * impact;
+			settle = false;
 		}
 
 		double tickPart = Math.min(0.99, Math.max(0, (clock.getAsLong() - lastTickNanos) / (double) TICK_NANOS));
 		double spent = Math.min(length - 0.01, Math.max(0, cycle - start.cycle) + tickPart);
-		double target = Timing.curve(spent / length, hold, power);
+		double target = settle ? Timing.settle(spent / length, hold, power) : Timing.curve(spent / length, hold, power);
 		int divisor = Timing.divisor(spent, target, start.drawn);
 		if (divisor == 0)
 		{

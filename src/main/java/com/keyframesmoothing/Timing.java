@@ -36,6 +36,27 @@ final class Timing
 	}
 
 	/**
+	 * Like {@link #curve}, but the move also slows down as it reaches the next pose (ease in and out), so both poses
+	 * stay in view a moment.
+	 *
+	 * @param power 1 = straight; above 1 the move lingers longer near both poses
+	 */
+	static double settle(double x, double hold, double power)
+	{
+		if (x <= hold)
+		{
+			return 0;
+		}
+		if (x >= 1)
+		{
+			return 1;
+		}
+		double s = (x - hold) / (1 - hold);
+		double a = Math.pow(s, power);
+		return a / (a + Math.pow(1 - s, power));
+	}
+
+	/**
 	 * The frame length to give the client for this drawn frame, so the blend lands as close to the target as it can
 	 * without going back from what was drawn last. 0 means don't blend at all (the pose holds).
 	 *

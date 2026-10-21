@@ -12,26 +12,6 @@ public interface KeyframeSmoothingConfig extends Config
 {
 	String GROUP = "keyframesmoothing";
 
-	enum Style
-	{
-		SMOOTH("Smooth"),
-		BALANCED("Balanced"),
-		PUNCHY("Punchy");
-
-		private final String name;
-
-		Style(String name)
-		{
-			this.name = name;
-		}
-
-		@Override
-		public String toString()
-		{
-			return name;
-		}
-	}
-
 	@ConfigSection(
 		name = "Smooth",
 		description = "What gets smoothed",
@@ -39,29 +19,17 @@ public interface KeyframeSmoothingConfig extends Config
 	)
 	String smoothSection = "smooth";
 
+	@Range(max = 100)
+	@Units(Units.PERCENT)
 	@ConfigItem(
-		keyName = "style",
-		name = "Style",
-		description = "Smooth: everything is smoothed (glitches still fixed).<br>"
-			+ "Balanced: poses the animation holds stay put, then move on.<br>"
-			+ "Punchy: like Balanced, and shorter holds stay put too",
+		keyName = "impact",
+		name = "Impact",
+		description = "0: plain smoothing, every keyframe blends at an even speed.<br>"
+			+ "Higher: attacks and other actions hold their poses a moment, then speed up into the next one,<br>"
+			+ "so hits land hard while everything stays smooth. Walking and standing stay even",
 		position = 0
 	)
-	default Style style()
-	{
-		return Style.BALANCED;
-	}
-
-	@Range(max = 200)
-	@Units(Units.MILLISECONDS)
-	@ConfigItem(
-		keyName = "blendTime",
-		name = "Move into next pose",
-		description = "How long a held pose takes to move into the next one, at the end of the hold.<br>"
-			+ "0 snaps straight to the next pose, as the game does without smoothing",
-		position = 1
-	)
-	default int blendTime()
+	default int impact()
 	{
 		return 60;
 	}
@@ -71,7 +39,7 @@ public interface KeyframeSmoothingConfig extends Config
 		name = "Fix smoothing glitches",
 		description = "Shows a keyframe without smoothing when smoothing would spin a part the wrong way<br>"
 			+ "or slide it across the screen (windmills, spell effects, some NPCs)",
-		position = 2
+		position = 1
 	)
 	default boolean fixGlitches()
 	{

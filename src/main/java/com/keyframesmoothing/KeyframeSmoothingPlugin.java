@@ -55,6 +55,8 @@ public class KeyframeSmoothingPlugin extends Plugin
 {
 	/** Length of a client tick in nanoseconds, the unit of animation frame lengths. */
 	private static final long TICK_NANOS = 20_000_000L;
+	/** Ticks a big turn in an action takes to whip into the next pose. */
+	private static final int QUICK_TICKS = 2;
 
 	@Inject
 	private Client client;
@@ -313,26 +315,31 @@ public class KeyframeSmoothingPlugin extends Plugin
 			return true;
 		}
 		byte letter = info.keyframes == null ? (byte) '.' : info.keyframes[frame];
-		if (letter == KeyframeTable.TURN || letter == KeyframeTable.JUMP)
-		{
-			return !config.fixGlitches();
-		}
-
-		// walking and standing keep an even speed; so does everything at 0 impact
 		double impact = config.impact() / 100.0;
+		boolean glitch = config.fixGlitches() && (letter == KeyframeTable.TURN || letter == KeyframeTable.JUMP);
+		// walking and standing keep an even speed; so does everything at 0 impact
 		if (!action || impact <= 0)
 		{
-			return true;
+			return !glitch;
 		}
+
+		int length = info.frameLengths[frame];
 		double hold = 0;
 		double power = 1 + 0.8 * impact;
-		if (letter == KeyframeTable.HOLD || letter == KeyframeTable.PUNCH && impact >= 0.6)
+		if (glitch)
+		{
+			// a big turn or jump in an action is mostly the strike itself: keep the pose, then whip into the next one
+			// in the last ticks, so a turn the wrong way only shows for a moment (loops starting over, where jumps
+			// matter most, are walking, standing and objects: never blended above)
+			hold = Math.max(0, 1 - QUICK_TICKS / (double) length);
+			power = 2;
+		}
+		else if (letter == KeyframeTable.HOLD || letter == KeyframeTable.PUNCH && impact >= 0.6)
 		{
 			hold = (letter == KeyframeTable.HOLD ? 0.45 : 0.3) * impact;
 			power = 1 + 1.6 * impact;
 		}
 
-		int length = info.frameLengths[frame];
 		double tickPart = Math.min(0.99, Math.max(0, (clock.getAsLong() - lastTickNanos) / (double) TICK_NANOS));
 		double spent = Math.min(length - 0.01, Math.max(0, cycle - start.cycle) + tickPart);
 		double target = Timing.curve(spent / length, hold, power);

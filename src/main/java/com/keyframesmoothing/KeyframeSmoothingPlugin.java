@@ -27,9 +27,10 @@ import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.PluginDescriptor;
 
 /**
- * Smooths animations between their keyframes, the way RuneLite's own smoothing does, but with timing: in actions
- * (attacks, skilling, emotes) a pose the animation holds stays put a moment, and each move speeds up into the next pose,
- * so hits land hard while the motion stays smooth. Keyframes that smoothing would turn into a glitch are not blended.
+ * Smooths animations between their keyframes, the way RuneLite's own smoothing does, but paced like a spline through
+ * the keyframes: in actions (attacks, skilling, emotes) the speed carries over keyframes where the motion goes on, eases
+ * where it turns back, and hits arrive at full speed, so one fluid motion follows the keyframes and their impact.
+ * Keyframes that smoothing would turn into a glitch are not blended in walking, standing and objects.
  *
  * The timing works through the client's own blend: keyframe f is blended into f + 1 by the time spent on it divided by
  * its frame length. Just before a frame is drawn (BeforeRender), the plugin sets the frame length of each character's
@@ -55,8 +56,9 @@ public class KeyframeSmoothingPlugin extends Plugin
 {
 	/** Length of a client tick in nanoseconds, the unit of animation frame lengths. */
 	private static final long TICK_NANOS = 20_000_000L;
-	/** Ticks a big turn in an action takes to whip into the next pose. */
-	private static final int QUICK_TICKS = 2;
+	/** Pace through a keyframe that is a glitch when smoothed: slow out of the pose, fast into the next. */
+	private static final double GLITCH_START = 0.2;
+	private static final double GLITCH_END = 2.5;
 
 	@Inject
 	private Client client;
@@ -323,31 +325,29 @@ public class KeyframeSmoothingPlugin extends Plugin
 			return !glitch;
 		}
 
-		int length = info.frameLengths[frame];
-		// every keyframe pose stays in view a moment, and the move into the next one slows down as it gets there
-		double hold = 0.3 * impact;
-		double power = 1 + impact;
-		boolean settle = true;
+		// the pace a spline through the keyframes would have: speed carries over where the motion goes on, eases where
+		// it turns back, and hits arrive at full speed
+		double startSpeed = 1, endSpeed = 1;
+		if (info.timing != null)
+		{
+			startSpeed = info.timing[2 * frame] / 10.0;
+			endSpeed = info.timing[2 * frame + 1] / 10.0;
+		}
 		if (glitch)
 		{
-			// a big turn or jump in an action is mostly the strike itself: keep the pose, then whip into the next one
-			// in the last ticks, so a turn the wrong way only shows for a moment (loops starting over, where jumps
-			// matter most, are walking, standing and objects: never blended above)
-			hold = Math.max(0, 1 - QUICK_TICKS / (double) length);
-			power = 2;
-			settle = false;
+			// a big turn or jump in an action is mostly the strike itself: through it fast, so a turn the wrong way only
+			// shows for a moment (loops starting over, where jumps matter most, are never blended above)
+			startSpeed = Math.min(startSpeed, GLITCH_START);
+			endSpeed = Math.max(endSpeed, GLITCH_END);
 		}
-		else if (letter == KeyframeTable.HOLD || letter == KeyframeTable.PUNCH && impact >= 0.6)
-		{
-			// a pose the animation holds: stays longer, then speeds into the next one
-			hold = (letter == KeyframeTable.HOLD ? 0.5 : 0.4) * impact;
-			power = 1 + 1.6 * impact;
-			settle = false;
-		}
+		// the cubic never moves back for speeds up to 3
+		startSpeed = Math.min(3, 1 + impact * (startSpeed - 1));
+		endSpeed = Math.min(3, 1 + impact * (endSpeed - 1));
 
+		int length = info.frameLengths[frame];
 		double tickPart = Math.min(0.99, Math.max(0, (clock.getAsLong() - lastTickNanos) / (double) TICK_NANOS));
 		double spent = Math.min(length - 0.01, Math.max(0, cycle - start.cycle) + tickPart);
-		double target = settle ? Timing.settle(spent / length, hold, power) : Timing.curve(spent / length, hold, power);
+		double target = Timing.pace(spent / length, startSpeed, endSpeed);
 		int divisor = Timing.divisor(spent, target, start.drawn);
 		if (divisor == 0)
 		{
@@ -383,7 +383,7 @@ public class KeyframeSmoothingPlugin extends Plugin
 		if (info == null && !animations.containsKey(animationId))
 		{
 			Animation animation = client.loadAnimation(animationId);
-			info = animation == null ? null : new AnimationInfo(animation, table.get(animationId));
+			info = animation == null ? null : new AnimationInfo(animation, table.get(animationId), table.timing(animationId));
 			animations.put(animationId, info);
 		}
 		return info;
@@ -412,13 +412,16 @@ public class KeyframeSmoothingPlugin extends Plugin
 		final byte[] keyframes;
 		/** The real frame lengths (a copy taken before any change), or null for skeletal animations, which never blend. */
 		final int[] frameLengths;
+		/** Start and end speed of each keyframe's blend, or null when even. */
+		final byte[] timing;
 
-		AnimationInfo(Animation animation, byte[] letters)
+		AnimationInfo(Animation animation, byte[] letters, byte[] timing)
 		{
 			int[] lengths = animation.isMayaAnim() ? null : animation.getFrameLengths();
 			frameLengths = lengths == null ? null : lengths.clone();
 			// a table made from an older game cache: only trust it when the keyframes still line up
 			keyframes = letters != null && lengths != null && lengths.length == letters.length ? letters : null;
+			this.timing = keyframes != null && timing != null && timing.length == 2 * lengths.length ? timing : null;
 		}
 	}
 

@@ -25,8 +25,8 @@ public interface KeyframeSmoothingConfig extends Config
 		keyName = "impact",
 		name = "Impact",
 		description = "0: plain smoothing, every keyframe blends at an even speed.<br>"
-			+ "Higher: attacks and other actions hold their poses a moment, then speed up into the next one,<br>"
-			+ "so hits land hard while everything stays smooth. Walking and standing stay even",
+			+ "Higher: attacks and other actions are paced like one fluid motion through their keyframes:<br>"
+			+ "swings carry on, turning points ease, hits land at full speed. Walking and standing stay even",
 		position = 0
 	)
 	default int impact()

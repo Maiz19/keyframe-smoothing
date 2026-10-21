@@ -17,14 +17,13 @@ final class Timing
 	}
 
 	/**
-	 * How far along keyframe f the pose should be, for x = time spent / keyframe length (0..1).
-	 *
-	 * @param hold  part of the keyframe the pose stays put (0..1)
-	 * @param power 1 = straight; above 1 the move starts slow and speeds up into the next pose
+	 * How far along keyframe f the pose should be, for x = time spent / keyframe length (0..1): a cubic that starts at
+	 * speed m0 and ends at speed m1 (1 = the speed of an even blend), as a spline paces the motion through its keyframes.
+	 * Stays between 0 and 1 and never moves back for speeds from 0 to 3.
 	 */
-	static double curve(double x, double hold, double power)
+	static double pace(double x, double m0, double m1)
 	{
-		if (x <= hold)
+		if (x <= 0)
 		{
 			return 0;
 		}
@@ -32,28 +31,9 @@ final class Timing
 		{
 			return 1;
 		}
-		return Math.pow((x - hold) / (1 - hold), power);
-	}
-
-	/**
-	 * Like {@link #curve}, but the move also slows down as it reaches the next pose (ease in and out), so both poses
-	 * stay in view a moment.
-	 *
-	 * @param power 1 = straight; above 1 the move lingers longer near both poses
-	 */
-	static double settle(double x, double hold, double power)
-	{
-		if (x <= hold)
-		{
-			return 0;
-		}
-		if (x >= 1)
-		{
-			return 1;
-		}
-		double s = (x - hold) / (1 - hold);
-		double a = Math.pow(s, power);
-		return a / (a + Math.pow(1 - s, power));
+		double x2 = x * x, x3 = x2 * x;
+		double u = (x3 - 2 * x2 + x) * m0 + (3 * x2 - 2 * x3) + (x3 - x2) * m1;
+		return Math.min(1, Math.max(0, u));
 	}
 
 	/**

@@ -5,8 +5,11 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
+import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Map;
+import java.util.Set;
 import lombok.extern.slf4j.Slf4j;
 
 /**
@@ -26,10 +29,30 @@ final class KeyframeTable
 	static final byte PUNCH = 'P';
 
 	private final Map<Integer, byte[]> keyframes;
+	/** Animations with a keyframe that is a glitch when smoothed. Read from the render threads too: never changed. */
+	private final Set<Integer> glitches;
 
 	private KeyframeTable(Map<Integer, byte[]> keyframes)
 	{
 		this.keyframes = keyframes;
+		Set<Integer> glitches = new HashSet<>();
+		keyframes.forEach((id, letters) ->
+		{
+			for (byte letter : letters)
+			{
+				if (letter == TURN || letter == JUMP)
+				{
+					glitches.add(id);
+					break;
+				}
+			}
+		});
+		this.glitches = Collections.unmodifiableSet(glitches);
+	}
+
+	boolean hasGlitches(int animationId)
+	{
+		return glitches.contains(animationId);
 	}
 
 	/** The letters for an animation, or null when all its keyframes are smoothed. */

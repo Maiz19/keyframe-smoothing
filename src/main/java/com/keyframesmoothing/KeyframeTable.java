@@ -13,9 +13,9 @@ import java.util.Set;
 import lombok.extern.slf4j.Slf4j;
 
 /**
- * How to treat each keyframe of the game's classic animations, worked out from the game cache ahead of time, for the
- * blend from that keyframe to the next: a letter (glitches), and its timing as a spline would pace it (the speed at the
- * start and the end of the blend, relative to an even blend).
+ * Keyframes of the game's classic animations that smoothing turns into a glitch, worked out from the game cache ahead of
+ * time: one letter per keyframe, for the blend from that keyframe to the next. Used where the plugin can't learn an
+ * animation itself: walking, standing and animated objects. Animations added later are simply smoothed.
  */
 @Slf4j
 final class KeyframeTable
@@ -24,21 +24,14 @@ final class KeyframeTable
 	static final byte TURN = 'T';
 	/** Smoothing would slide a part over a jump (a loop starting over, an effect popping back). */
 	static final byte JUMP = 'C';
-	/** A pose the animation holds before a fast move. */
-	static final byte HOLD = 'H';
-	/** A shorter held pose, kept in the Punchy style only. */
-	static final byte PUNCH = 'P';
 
 	private final Map<Integer, byte[]> keyframes;
-	/** Per animation: start and end speed of each keyframe's blend, two per keyframe, in tenths of an even blend. */
-	private final Map<Integer, byte[]> timings;
 	/** Animations with a keyframe that is a glitch when smoothed. Read from the render threads too: never changed. */
 	private final Set<Integer> glitches;
 
-	private KeyframeTable(Map<Integer, byte[]> keyframes, Map<Integer, byte[]> timings)
+	private KeyframeTable(Map<Integer, byte[]> keyframes)
 	{
 		this.keyframes = keyframes;
-		this.timings = timings;
 		Set<Integer> glitches = new HashSet<>();
 		keyframes.forEach((id, letters) ->
 		{
@@ -65,22 +58,15 @@ final class KeyframeTable
 		return keyframes.get(animationId);
 	}
 
-	/** Start and end speed of each keyframe's blend (two per keyframe, tenths of an even blend), or null when even. */
-	byte[] timing(int animationId)
-	{
-		return timings.get(animationId);
-	}
-
 	static KeyframeTable load()
 	{
 		Map<Integer, byte[]> keyframes = new HashMap<>();
-		Map<Integer, byte[]> timings = new HashMap<>();
 		try (InputStream in = KeyframeTable.class.getResourceAsStream("keyframes.txt"))
 		{
 			if (in == null)
 			{
 				log.warn("keyframes.txt is missing; every keyframe is smoothed");
-				return new KeyframeTable(keyframes, timings);
+				return new KeyframeTable(keyframes);
 			}
 			BufferedReader reader = new BufferedReader(new InputStreamReader(in, StandardCharsets.UTF_8));
 			for (String line; (line = reader.readLine()) != null; )
@@ -90,22 +76,10 @@ final class KeyframeTable
 					continue;
 				}
 				String[] parts = line.split(" ");
-				int id = Integer.parseInt(parts[0]);
-				int count = Integer.parseInt(parts[1]);
 				byte[] letters = parts[2].getBytes(StandardCharsets.US_ASCII);
-				if (letters.length != count)
+				if (letters.length == Integer.parseInt(parts[1]))
 				{
-					continue;
-				}
-				keyframes.put(id, letters);
-				if (parts.length > 3 && parts[3].length() == 2 * count)
-				{
-					byte[] timing = new byte[2 * count];
-					for (int i = 0; i < timing.length; i++)
-					{
-						timing[i] = (byte) Character.digit(parts[3].charAt(i), 36);
-					}
-					timings.put(id, timing);
+					keyframes.put(Integer.parseInt(parts[0]), letters);
 				}
 			}
 		}
@@ -113,6 +87,6 @@ final class KeyframeTable
 		{
 			log.warn("Couldn't read keyframes.txt; every keyframe is smoothed", e);
 		}
-		return new KeyframeTable(keyframes, timings);
+		return new KeyframeTable(keyframes);
 	}
 }

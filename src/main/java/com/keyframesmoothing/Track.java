@@ -12,6 +12,13 @@ final class Track
 	boolean action;
 	/** Game cycle the current keyframe started on. */
 	int startCycle;
+	/**
+	 * A pose (standing, walking) that went round to its first keyframe: the game clears its counter there, so that keyframe
+	 * stays a client cycle longer than its length (see ActorDrawer.ticks).
+	 */
+	boolean wentRound;
+	/** The pose last shown and its keyframe, -1 before the first and while an action plays. */
+	private int poseId = -1, poseFrame = -1;
 	/** An attack on a player or NPC, decided when the animation starts. */
 	boolean attack;
 	/** An action striking with a skill's tool (see SkillSwings), decided when the animation starts: its swings are drawn as an attack's blows from the first. */
@@ -75,7 +82,8 @@ final class Track
 	Boolean blend;
 
 	/**
-	 * The keyframe the game shows this client cycle. An action whose keyframe goes back has started over: on its own, at
+	 * The keyframe the game shows this client cycle. A pose that takes over from another (standing from walking) goes on in
+	 * its keyframe with the game's counter where it was, not from the keyframe's start. An action whose keyframe goes back has started over: on its own, at
 	 * the end of a loop, or because the game sent it again, which puts some back at their first keyframe from wherever
 	 * they were (chopping, every few game ticks: in the middle of a swing).
 	 *
@@ -89,6 +97,19 @@ final class Track
 			return false;
 		}
 		int last = this.frame;
+		// another pose took over in the same keyframe: the game's counter goes on (but for a few NPCs, none of them pets,
+		// whose poses start over: in their first keyframe the two can't be told apart)
+		boolean goesOn = !action && poseId >= 0 && poseId != animationId && frame == poseFrame;
+		wentRound = !action && (goesOn ? wentRound : poseId == animationId && frame == 0 && last > 0);
+		poseId = action ? -1 : animationId;
+		poseFrame = frame;
+		if (goesOn)
+		{
+			// the keyframe of another animation: not tried yet
+			this.frame = frame;
+			triedCycle = -1;
+			return false;
+		}
 		boolean again = action && frame < last;
 		if (again)
 		{

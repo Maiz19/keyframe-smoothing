@@ -1,5 +1,6 @@
 package com.keyframesmoothing;
 
+import java.util.HashMap;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
@@ -69,6 +70,31 @@ final class Poses
 		}
 	}
 
+	/** Per animation worked out or checked here, how far past its last keyframe the game goes back (its frame step); client thread. */
+	private static final Map<Integer, Integer> FRAME_STEPS = new HashMap<>();
+
+	static void frameStep(int animationId, int step)
+	{
+		FRAME_STEPS.put(animationId, step);
+	}
+
+	/**
+	 * Whether a pose of that many keyframes goes on from its last into its first one, the client blending it so: not one
+	 * that goes back to a later keyframe, nor one not known (yet).
+	 */
+	static boolean goesRound(int animationId, int keyframes)
+	{
+		Integer step = FRAME_STEPS.get(animationId);
+		return step != null && (step <= 0 || step == keyframes);
+	}
+
+	/** Whether the game clears its counter as the pose goes round, so that its first keyframe lasts a client cycle longer. */
+	static boolean roundClears(int animationId)
+	{
+		Integer step = FRAME_STEPS.get(animationId);
+		return step != null && step <= 0;
+	}
+
 	Poses(Client client)
 	{
 		this.client = client;
@@ -107,6 +133,7 @@ final class Poses
 		{
 			return null;
 		}
+		frameStep(animationId, animation.getFrameStep());
 		Model model = model(actor, animation, false);
 		if (model == null)
 		{
@@ -142,6 +169,7 @@ final class Poses
 		{
 			return new Outcome(null, "no keyframes", false);
 		}
+		frameStep(animationId, animation.getFrameStep());
 		missing = false;
 		Model model = model(actor, animation, false);
 		if (model != null && !sameFaces(model, drawn) && changesHands(animation))

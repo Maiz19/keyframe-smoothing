@@ -129,6 +129,8 @@ final class ActorDrawer
 	private float[] gripped = new float[0];
 	/** A rope's head at a moment of its own (see Moment.headKey). */
 	private float[] headPose = new float[0];
+	/** The keyframe a pose's step the client draws goes to (see onwards); reused. */
+	private float[] nextKey = new float[0];
 	private float[] savedX = new float[0], savedY = new float[0], savedZ = new float[0];
 	/** The pose last worked out for another plugin (see posed). */
 	private float[] posedX = new float[0], posedY = new float[0], posedZ = new float[0];
@@ -331,7 +333,7 @@ final class ActorDrawer
 			track.overdue = true;
 			return false;
 		}
-		double ticks = Math.min(lengths[k], into);
+		double ticks = ticks(track, lengths[k], into);
 		double s = ticks / lengths[k];
 		if (track.mode != Smoothing.KEYFRAMES)
 		{
@@ -401,7 +403,10 @@ final class ActorDrawer
 		// drawn at another time than the game's (not the last keyframe, which plain() puts at its start: from there the
 		// client blends a loop into its first keyframe, and holds the end of an animation that doesn't loop)
 		boolean warped = Math.abs(at.drawn - time) > 1e-6 || pushed;
-		if (!spline.smooths(shownKey) && !warped && !spline.roped())
+		// a pose's step the client draws (its last keyframe, or one the spline doesn't smooth): on from its blend each frame
+		boolean onwards = !track.action && !warped && shownKey == k && !spline.smooths(k) && !spline.roped()
+			&& !Boolean.FALSE.equals(track.blend) && !learnt.glitch(k) && (k < lengths.length - 1 || Poses.goesRound(track.animationId, lengths.length));
+		if (!spline.smooths(shownKey) && !warped && !onwards && !spline.roped())
 		{
 			// (a rope is laid in the client's own pose too, see PartSpline.rope: its blend tears the rope off its head)
 			return false;
@@ -430,7 +435,14 @@ final class ActorDrawer
 		{
 			spline.pose(headPose, at.headKey, at.headS, track.standing);
 		}
-		if (spline.smooths(shownKey))
+		if (onwards)
+		{
+			if (!onwards(track, spline, lengths[k], into, 3 * count))
+			{
+				return false;
+			}
+		}
+		else if (spline.smooths(shownKey))
 		{
 			// the head put in where its stub of rope lies in the hand
 			spline.pose(pose, shownKey, shownS, track.standing, own ? headPose : null);
@@ -470,6 +482,45 @@ final class ActorDrawer
 		}
 		model.translate(0, 0, 0);
 		model.calculateBoundsCylinder();
+		return true;
+	}
+
+	/**
+	 * Ticks into a keyframe of length ticks, into client cycles after it started. A pose's first keyframe after it went
+	 * round lasts a cycle longer (see Track.wentRound): spread over it, not standing still at its end.
+	 */
+	static double ticks(Track track, int length, double into)
+	{
+		return Math.min(length, longer(track) ? into * length / (length + 1) : into);
+	}
+
+	/** Whether the keyframe the track is at is the longer one after its pose went round (see Track.wentRound). */
+	private static boolean longer(Track track)
+	{
+		return !track.action && track.wentRound && track.frame == 0 && Poses.roundClears(track.animationId);
+	}
+
+	/**
+	 * A pose's step the client draws, which it blends once a cycle: from its blend of this cycle (in pose) on towards the
+	 * keyframe the step goes to, by the part of the cycle gone by. False when that keyframe isn't known.
+	 */
+	private boolean onwards(Track track, PartSpline spline, int length, double into, int count)
+	{
+		if (nextKey.length != count)
+		{
+			nextKey = new float[count];
+		}
+		if (!spline.clientPose(nextKey, track.frame, 1))
+		{
+			return false;
+		}
+		// the tick the client blends it at (a cycle behind in the longer keyframe, which it starts twice), and where it is now
+		double tick = Math.max(0, Math.min(length - 1, Math.floor(into) - (longer(track) ? 1 : 0)));
+		double part = Math.max(0, Math.min(1, (ticks(track, length, into) - tick) / (length - tick)));
+		for (int i = 0; i < count; i++)
+		{
+			pose[i] += (float) ((nextKey[i] - pose[i]) * part);
+		}
 		return true;
 	}
 

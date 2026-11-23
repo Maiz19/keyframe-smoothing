@@ -2,8 +2,6 @@
 
 Turns every attack, special and other action into one fluid motion that keeps its keyframes.
 
-![Obligator: no smoothing, RuneLite's smoothing and Keyframe Smoothing](docs/obligator.gif)
-
 Plain smoothing blends each keyframe into the next, which can spin arms and weapons the long way round and takes the force out of hits. This plugin follows one curve through all the keyframes. Attacks wind up further, strike faster and carry on past the hit, and still land on time.
 
 ![Corrupted halberd](docs/cghalberd.gif)

@@ -275,6 +275,8 @@ final class Learning
 		final double[] sizes;
 		/** Roughly the memory it holds. */
 		final long bytes;
+		/** The client cycle it was last drawn in (or learnt in), to keep what a crowd draws (client thread only). */
+		int drawn;
 		/**
 		 * Per keyframe a blow ends in, for exaggerated blows (see ActorDrawer.moment): the keyframe its wind-up turns
 		 * round at (see windUp), the step it is pushed on past that along (-1: none) and how far (a part of that step),

@@ -108,8 +108,10 @@ public class KeyframeSmoothingPlugin extends Plugin
 	/** Length of a client cycle in nanoseconds, the unit of animation frame lengths. */
 	static final long TICK_NANOS = 20_000_000L;
 	/** Animations worked out kept at most, and the memory they may hold (least recently used go first, yours last). */
-	private static final int MAX_LEARNT = 48;
-	private static final long LEARNT_BYTES = 32L << 20;
+	private static final int MAX_LEARNT = 128;
+	private static final long LEARNT_BYTES = 64L << 20;
+	/** A learnt animation drawn within so many client cycles (5 s) is not pushed out for another actor's (see admits). */
+	static final int RECENT = 250;
 	/** Keyframes an animation is tried at before it is left to the client (see work); at most so many tries a frame. */
 	private static final int TRIES = 3;
 	private static final int TRIES_PER_FRAME = 4;
@@ -179,6 +181,8 @@ public class KeyframeSmoothingPlugin extends Plugin
 	/** Per animation of the local player's attacks: when its own hitsplats came (see hitAt). */
 	private final Map<Integer, HitTimes> hitTimes = new HashMap<>();
 	private long learntBytes;
+	/** Lessons being learnt off the client thread (learning also keeps the failed ones). */
+	private int inFlight;
 	/** Being worked out off the client thread, or failed: not started again. */
 	private final Set<Long> learning = new HashSet<>();
 	/** Animations on a model that could not be worked out, and why (left to the client); tries so far of the others. */
@@ -1403,6 +1407,14 @@ public class KeyframeSmoothingPlugin extends Plugin
 			return;
 		}
 		boolean workedAhead = unchecked.contains(key);
+		if (!workedAhead && !learnt.isEmpty()
+			&& !admits(actor == local, learnt.size(), inFlight, learntBytes, eldestDrawn(), client.getGameCycle()))
+		{
+			// the store is full of animations drawn just now: learning this one would push one out, to be learnt anew
+			// at once (a crowd of more looks than the store holds); the client draws it meanwhile. Not one of its TRIES,
+			// but it does count for this frame (see work): a crowd's models are captured at most so many a frame.
+			return;
+		}
 		Poses.Outcome outcome = workedAhead ? poses.check(actor, track.animationId, model, track.frame)
 			: poses.lesson(actor, track.animationId, lengths, model, shape, track.frame);
 		if (outcome != null && outcome.lesson == null)
@@ -1573,6 +1585,7 @@ public class KeyframeSmoothingPlugin extends Plugin
 			return;
 		}
 		learning.add(key);
+		inFlight++;
 		learner.execute(() ->
 		{
 			Thread.currentThread().setPriority(Thread.MIN_PRIORITY);
@@ -1582,6 +1595,7 @@ public class KeyframeSmoothingPlugin extends Plugin
 				clientThread.invokeLater(() ->
 				{
 					learning.remove(key);
+					inFlight--;
 					if (unworkable.containsKey(key))
 					{
 						// worked out ahead, and found not to be what the client draws meanwhile
@@ -1589,6 +1603,7 @@ public class KeyframeSmoothingPlugin extends Plugin
 					}
 					Learning.Learnt before = learnt.put(key, result);
 					learntBytes += result.bytes - (before == null ? 0 : before.bytes);
+					result.drawn = client.getGameCycle();
 					if (lesson.yours)
 					{
 						yours.add(key);
@@ -1607,6 +1622,7 @@ public class KeyframeSmoothingPlugin extends Plugin
 			catch (RuntimeException e)
 			{
 				// stays in learning: not tried again this session
+				clientThread.invokeLater(() -> inFlight--);
 				log.debug("Could not work out animation {}", lesson.animationId, e);
 			}
 		});
@@ -1623,6 +1639,37 @@ public class KeyframeSmoothingPlugin extends Plugin
 			}
 		}
 		return byUse.iterator().next();
+	}
+
+	/** When the animation that would be forgotten first (see forgetFirst) was last drawn; the store must not be empty. */
+	private int eldestDrawn()
+	{
+		long eldest = forgetFirst(learnt.keySet(), yours);
+		// not learnt.get: that would count as a use
+		for (Map.Entry<Long, Learning.Learnt> entry : learnt.entrySet())
+		{
+			if (entry.getKey() == eldest)
+			{
+				return entry.getValue().drawn;
+			}
+		}
+		return client.getGameCycle() - RECENT - 1;
+	}
+
+	/**
+	 * Whether an animation may be learnt now: the local player's own always, and any while the store has room (the
+	 * learnt and the lessons in flight, in count and memory: one of the size the learnt are on average must fit);
+	 * when full only if the animation that would be pushed out was not drawn within RECENT cycles. Else a crowd of
+	 * more looks than the store holds learns the same ones over and over.
+	 */
+	static boolean admits(boolean own, int stored, int inFlight, long bytes, int eldestDrawn, int cycle)
+	{
+		long average = stored == 0 ? 0 : bytes / stored;
+		if (own || (stored + inFlight < MAX_LEARNT && bytes + (inFlight + 1) * average <= LEARNT_BYTES))
+		{
+			return true;
+		}
+		return cycle - eldestDrawn > RECENT;
 	}
 
 	// ---- the filter ----
@@ -1751,7 +1798,12 @@ public class KeyframeSmoothingPlugin extends Plugin
 
 	Learning.Learnt learnt(int animationId, long shape)
 	{
-		return learnt.get(key(animationId, shape));
+		Learning.Learnt known = learnt.get(key(animationId, shape));
+		if (known != null)
+		{
+			known.drawn = client.getGameCycle();
+		}
+		return known;
 	}
 
 	/** Ticks the character has shown its current keyframe, with the part of a tick since the client's last cycle. */

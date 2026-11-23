@@ -79,6 +79,73 @@ final class PartSpline
 	private final boolean[] measuredParts;
 	/** Where pose() puts the parts' vertices before writing them out; reused, per thread (objects are drawn on render threads). */
 	private final ThreadLocal<float[][]> placing = ThreadLocal.withInitial(() -> new float[][]{new float[0]});
+	/** What the per-frame methods work in (pose, push, keepGrip, rope, fling, measure); reused, per thread as placing. */
+	private final ThreadLocal<Scratch> scratch = ThreadLocal.withInitial(Scratch::new);
+
+	/**
+	 * Arrays the per-frame methods reuse instead of making new ones each frame. Each method has its own (measure's are
+	 * used only inside it), so one that calls another never finds its arrays overwritten.
+	 */
+	private static final class Scratch
+	{
+		// measure
+		final double[] cross = new double[9], eigen = new double[32];
+		// poseSpline: per part its turn, stretch and centre (posed: it has them now)
+		double[][] turn = new double[0][], stretch = new double[0][], centre = new double[0][];
+		boolean[] posed = new boolean[0];
+		final double[] spin = new double[3], middle = new double[3], off = new double[3], step = new double[4], piece = new double[4];
+		final double[] r = new double[3], where = new double[3], carried = new double[3], turned = new double[3], local = new double[3];
+		final double[] held = new double[7], stub = new double[3];
+		// push: per part its turn, the point it turns about now and where that goes (spun: it turns), its parent as now
+		// (seen: 0 not measured yet, 1 measured, 2 too few vertices)
+		double[][] pushSpin = new double[0][], anchor = new double[0][], moved = new double[0][], now = new double[0][];
+		boolean[] spun = new boolean[0];
+		byte[] seen = new byte[0];
+		final double[] pushR = new double[3], to = new double[3];
+		// keepGrip
+		final double[] from = new double[7], toward = new double[7], body = new double[7], grasp = new double[3], hand = new double[3];
+		final double[] undo = new double[4], move = new double[4], gripR = new double[3], gripS = new double[3], shoulder = new double[3];
+		final double[] gripSpin = new double[4], gripTo = new double[3];
+		// rope: the chain's joints, each link's turn
+		double[][] joints = new double[0][], turns = new double[0][];
+		final double[] ropeHeld = new double[7], ropeR = new double[3], was = new double[3], dir = new double[3], bend = new double[4];
+		final double[] ropeMoved = new double[3];
+		// fling
+		final double[] flingNow = new double[7], flingThen = new double[7], flingBack = new double[4], flingTurn = new double[4];
+		final double[] flingShift = new double[3], flingOn = new double[3];
+		// clientPose: the client's pose (standing false), the spline's poses either side
+		float[] client = new float[0], before = new float[0], after = new float[0];
+
+		/** Sizes the per-part arrays for parts parts. */
+		void parts(int parts)
+		{
+			if (posed.length >= parts)
+			{
+				return;
+			}
+			turn = new double[parts][4];
+			stretch = new double[parts][9];
+			centre = new double[parts][3];
+			posed = new boolean[parts];
+			pushSpin = new double[parts][4];
+			anchor = new double[parts][3];
+			moved = new double[parts][3];
+			now = new double[parts][7];
+			spun = new boolean[parts];
+			seen = new byte[parts];
+		}
+
+		/** Sizes the rope's arrays for a chain of links links. */
+		void links(int links)
+		{
+			if (joints.length >= links + 1)
+			{
+				return;
+			}
+			joints = new double[links + 1][3];
+			turns = new double[links][4];
+		}
+	}
 	final boolean[] driven;
 	/** The joint tree: each part's parent (-1 for a root), the joint point (keyframe 0 coordinates), and the order to place them. */
 	final int[] parent;
@@ -1283,8 +1350,14 @@ final class PartSpline
 			return false;
 		}
 		// the points, in ticks from the step's start; of a step either side the spline draws, a pose of the spline
-		float[] before = k <= 0 ? null : !smooths(k - 1) ? last(clientSamples[k - 1]) : splinePose(k - 1, 1 - NEIGHBOUR);
-		float[] after = k + 1 >= keyframes - 1 ? null : !smooths(k + 1) ? first(clientSamples[k + 1]) : splinePose(k + 1, NEIGHBOUR);
+		Scratch work = scratch.get();
+		if (work.before.length != keys[0].length)
+		{
+			work.before = new float[keys[0].length];
+			work.after = new float[keys[0].length];
+		}
+		float[] before = k <= 0 ? null : !smooths(k - 1) ? last(clientSamples[k - 1]) : splinePose(k - 1, 1 - NEIGHBOUR, work.before);
+		float[] after = k + 1 >= keyframes - 1 ? null : !smooths(k + 1) ? first(clientSamples[k + 1]) : splinePose(k + 1, NEIGHBOUR, work.after);
 		int own = clientSamples[k].length, count = own + 2 + (before != null ? 1 : 0) + (after != null ? 1 : 0);
 		double[] at = new double[count];
 		float[][] seen = new float[count][];
@@ -1341,7 +1414,12 @@ final class PartSpline
 		{
 			return clientPose(out, k, s);
 		}
-		float[] client = new float[out.length];
+		Scratch work = scratch.get();
+		if (work.client.length != out.length)
+		{
+			work.client = new float[out.length];
+		}
+		float[] client = work.client;
 		if (!clientPose(client, k, s))
 		{
 			return false;
@@ -1368,6 +1446,14 @@ final class PartSpline
 	private float[] splinePose(int k, double s)
 	{
 		float[] out = keys[k].clone();
+		pose(out, k, s);
+		return out;
+	}
+
+	/** As {@link #splinePose(int, double)}, into out (as long as a keyframe). */
+	private float[] splinePose(int k, double s, float[] out)
+	{
+		System.arraycopy(keys[k], 0, out, 0, keys[k].length);
 		pose(out, k, s);
 		return out;
 	}
@@ -1624,9 +1710,16 @@ final class PartSpline
 	 */
 	double[] measure(float[] pose, int p)
 	{
+		double[] out = new double[7];
+		return measure(pose, p, out) ? out : null;
+	}
+
+	/** As {@link #measure(float[], int)}, into out (7 long); false (out as it was) when the part has too few vertices. */
+	private boolean measure(float[] pose, int p, double[] out)
+	{
 		if (fit.members[p] < 3)
 		{
-			return null;
+			return false;
 		}
 		double cx = 0, cy = 0, cz = 0;
 		int[] own = members[p];
@@ -1639,14 +1732,19 @@ final class PartSpline
 		cx /= own.length;
 		cy /= own.length;
 		cz /= own.length;
-		double[] cross = new double[9];
+		Scratch work = scratch.get();
+		double[] cross = work.cross;
+		java.util.Arrays.fill(cross, 0);
 		for (int v : own)
 		{
 			Fit.outer(cross, fit.rest[3 * v], fit.rest[3 * v + 1], fit.rest[3 * v + 2], pose[3 * v] - cx, pose[3 * v + 1] - cy,
 				pose[3 * v + 2] - cz);
 		}
-		double[] q = Quaternions.fit(cross);
-		return new double[]{q[0], q[1], q[2], q[3], cx, cy, cz};
+		Quaternions.fit(cross, work.eigen, out);
+		out[4] = cx;
+		out[5] = cy;
+		out[6] = cz;
+		return true;
 	}
 
 	/** Whether part p's motion moves every vertex of a piece onto its keyframe poses. */
@@ -1884,11 +1982,21 @@ final class PartSpline
 	/** The centre part p must have so that, turned and stretched as given, its joint point lands on where. */
 	private double[] carried(int p, double[] rotation, double[] stretch, double[] where)
 	{
+		double[] out = new double[3];
+		carried(p, rotation, stretch, where, out);
+		return out;
+	}
+
+	/** As {@link #carried(int, double[], double[], double[])}, into out (not where). */
+	private void carried(int p, double[] rotation, double[] stretch, double[] where, double[] out)
+	{
 		double[] c0 = fit.centre[0][p];
 		double x = pivot[p][0] - c0[0], y = pivot[p][1] - c0[1], z = pivot[p][2] - c0[2];
-		double[] r = Quaternions.rotate(rotation, stretch[0] * x + stretch[1] * y + stretch[2] * z,
-			stretch[3] * x + stretch[4] * y + stretch[5] * z, stretch[6] * x + stretch[7] * y + stretch[8] * z);
-		return new double[]{where[0] - r[0], where[1] - r[1], where[2] - r[2]};
+		Quaternions.rotate(rotation, stretch[0] * x + stretch[1] * y + stretch[2] * z,
+			stretch[3] * x + stretch[4] * y + stretch[5] * z, stretch[6] * x + stretch[7] * y + stretch[8] * z, out);
+		out[0] = where[0] - out[0];
+		out[1] = where[1] - out[1];
+		out[2] = where[2] - out[2];
 	}
 
 	/** Turn times stretch as a row-major 3x3 matrix. */
@@ -2106,9 +2214,15 @@ final class PartSpline
 		{
 			return;
 		}
-		// per part: the point it turns about now (anchor), where that goes (moved) and the turn
-		double[][] anchor = new double[parts][], moved = new double[parts][], spin = new double[parts][];
-		double[][] now = new double[parts][];
+		// per part: the point it turns about now (anchor), where that goes (moved) and the turn (spin, where spun)
+		Scratch work = scratch.get();
+		work.parts(parts);
+		double[][] anchor = work.anchor, moved = work.moved, spin = work.pushSpin, now = work.now;
+		boolean[] spun = work.spun;
+		byte[] seen = work.seen;
+		java.util.Arrays.fill(spun, false);
+		java.util.Arrays.fill(seen, (byte) 0);
+		double[] r = work.pushR, to = work.to;
 		for (int p : order)
 		{
 			if (!driven[p])
@@ -2116,42 +2230,53 @@ final class PartSpline
 				continue;
 			}
 			double[] t = turn[k][p];
-			spin[p] = Quaternions.exp(new double[]{e * t[0], e * t[1], e * t[2]});
+			Quaternions.exp(e * t[0], e * t[1], e * t[2], spin[p]);
+			spun[p] = true;
 			int up = parent[p];
 			if (up < 0)
 			{
-				double[] c = centroid(out, p);
+				double[] c = anchor[p];
+				centroid(out, p, c);
 				double[] a = fit.centre[k][p], b = fit.centre[k + 1][p];
-				anchor[p] = c;
-				moved[p] = new double[]{c[0] + e * (b[0] - a[0]), c[1] + e * (b[1] - a[1]), c[2] + e * (b[2] - a[2])};
+				moved[p][0] = c[0] + e * (b[0] - a[0]);
+				moved[p][1] = c[1] + e * (b[1] - a[1]);
+				moved[p][2] = c[2] + e * (b[2] - a[2]);
 				continue;
 			}
 			// the joint: carried by the parent as it is now
-			if (now[up] == null)
+			if (seen[up] == 0)
 			{
-				now[up] = measure(out, up);
+				seen[up] = measure(out, up, now[up]) ? (byte) 1 : (byte) 2;
 			}
-			double[] found = now[up];
-			if (found == null)
+			if (seen[up] == 2)
 			{
-				spin[p] = null;
+				spun[p] = false;
 				continue;
 			}
+			double[] found = now[up];
 			double[] c0 = fit.centre[0][up];
-			double[] r = Quaternions.rotate(new double[]{found[0], found[1], found[2], found[3]}, pivot[p][0] - c0[0],
-				pivot[p][1] - c0[1], pivot[p][2] - c0[2]);
-			double[] joint = {r[0] + found[4], r[1] + found[5], r[2] + found[6]};
-			anchor[p] = joint;
-			moved[p] = spin[up] == null ? joint : carry(spin[up], anchor[up], moved[up], joint);
+			Quaternions.rotate(found, pivot[p][0] - c0[0], pivot[p][1] - c0[1], pivot[p][2] - c0[2], r);
+			double[] joint = anchor[p];
+			joint[0] = r[0] + found[4];
+			joint[1] = r[1] + found[5];
+			joint[2] = r[2] + found[6];
+			if (spun[up])
+			{
+				carry(spin[up], anchor[up], moved[up], joint[0], joint[1], joint[2], moved[p]);
+			}
+			else
+			{
+				System.arraycopy(joint, 0, moved[p], 0, 3);
+			}
 		}
 		for (int v = 0; v < vertices; v++)
 		{
 			int p = partOf[v] >= 0 ? partOf[v] : follows[v];
-			if (p < 0 || spin[p] == null || partOf[v] < 0 && quiet[v] && !standing)
+			if (p < 0 || !spun[p] || partOf[v] < 0 && quiet[v] && !standing)
 			{
 				continue;
 			}
-			double[] to = carry(spin[p], anchor[p], moved[p], new double[]{out[3 * v], out[3 * v + 1], out[3 * v + 2]});
+			carry(spin[p], anchor[p], moved[p], out[3 * v], out[3 * v + 1], out[3 * v + 2], to);
 			out[3 * v] = (float) to[0];
 			out[3 * v + 1] = (float) to[1];
 			out[3 * v + 2] = (float) to[2];
@@ -2171,20 +2296,35 @@ final class PartSpline
 			return;
 		}
 		int tool = grip[0], hand = grip[1], arm = grip[2];
-		double[] from = measure(before, tool), to = measure(out, tool), body = measure(out, parent[arm]);
-		if (from == null || to == null || body == null)
+		Scratch work = scratch.get();
+		double[] from = work.from, to = work.toward, body = work.body;
+		if (!measure(before, tool, from) || !measure(out, tool, to) || !measure(out, parent[arm], body))
 		{
 			return;
 		}
 		// where the hand's place on the tool has gone, and the turn about the shoulder that gets the hand there
-		double[] held = centroid(before, hand), now = centroid(out, hand);
-		double[] move = Quaternions.multiply(new double[]{to[0], to[1], to[2], to[3]}, Quaternions.conjugate(new double[]{from[0], from[1], from[2], from[3]}));
-		double[] r = Quaternions.rotate(move, held[0] - from[4], held[1] - from[5], held[2] - from[6]);
+		double[] held = work.grasp, now = work.hand;
+		centroid(before, hand, held);
+		centroid(out, hand, now);
+		double[] undo = work.undo, move = work.move;
+		undo[0] = from[0];
+		undo[1] = -from[1];
+		undo[2] = -from[2];
+		undo[3] = -from[3];
+		Quaternions.multiply(to, undo, move);
+		double[] r = work.gripR;
+		Quaternions.rotate(move, held[0] - from[4], held[1] - from[5], held[2] - from[6], r);
 		double[] c0 = fit.centre[0][parent[arm]];
-		double[] s = Quaternions.rotate(new double[]{body[0], body[1], body[2], body[3]}, pivot[arm][0] - c0[0], pivot[arm][1] - c0[1], pivot[arm][2] - c0[2]);
-		double[] shoulder = {s[0] + body[4], s[1] + body[5], s[2] + body[6]};
-		double[] spin = between(now[0] - shoulder[0], now[1] - shoulder[1], now[2] - shoulder[2],
-			r[0] + to[4] - shoulder[0], r[1] + to[5] - shoulder[1], r[2] + to[6] - shoulder[2]);
+		double[] s = work.gripS;
+		Quaternions.rotate(body, pivot[arm][0] - c0[0], pivot[arm][1] - c0[1], pivot[arm][2] - c0[2], s);
+		double[] shoulder = work.shoulder;
+		shoulder[0] = s[0] + body[4];
+		shoulder[1] = s[1] + body[5];
+		shoulder[2] = s[2] + body[6];
+		double[] spin = work.gripSpin;
+		between(now[0] - shoulder[0], now[1] - shoulder[1], now[2] - shoulder[2],
+			r[0] + to[4] - shoulder[0], r[1] + to[5] - shoulder[1], r[2] + to[6] - shoulder[2], spin);
+		double[] turned = work.gripTo;
 		for (int v = 0; v < vertices; v++)
 		{
 			int p = partOf[v] >= 0 ? partOf[v] : follows[v];
@@ -2192,20 +2332,33 @@ final class PartSpline
 			{
 				continue;
 			}
-			double[] turned = carry(spin, shoulder, shoulder, new double[]{out[3 * v], out[3 * v + 1], out[3 * v + 2]});
+			carry(spin, shoulder, shoulder, out[3 * v], out[3 * v + 1], out[3 * v + 2], turned);
 			out[3 * v] = (float) turned[0];
 			out[3 * v + 1] = (float) turned[1];
 			out[3 * v + 2] = (float) turned[2];
 		}
 	}
 
-	/** The shortest turn from one direction to another. */
-	private static double[] between(double ax, double ay, double az, double bx, double by, double bz)
+	/** The shortest turn from one direction to another, into out. */
+	private static void between(double ax, double ay, double az, double bx, double by, double bz, double[] out)
 	{
-		double[] q = {Math.sqrt((ax * ax + ay * ay + az * az) * (bx * bx + by * by + bz * bz)) + ax * bx + ay * by + az * bz,
-			ay * bz - az * by, az * bx - ax * bz, ax * by - ay * bx};
-		double size = Math.sqrt(q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]);
-		return size > 0 ? new double[]{q[0] / size, q[1] / size, q[2] / size, q[3] / size} : new double[]{1, 0, 0, 0};
+		double w = Math.sqrt((ax * ax + ay * ay + az * az) * (bx * bx + by * by + bz * bz)) + ax * bx + ay * by + az * bz,
+			x = ay * bz - az * by, y = az * bx - ax * bz, z = ax * by - ay * bx;
+		double size = Math.sqrt(w * w + x * x + y * y + z * z);
+		if (size > 0)
+		{
+			out[0] = w / size;
+			out[1] = x / size;
+			out[2] = y / size;
+			out[3] = z / size;
+		}
+		else
+		{
+			out[0] = 1;
+			out[1] = 0;
+			out[2] = 0;
+			out[3] = 0;
+		}
 	}
 
 	/**
@@ -2281,15 +2434,17 @@ final class PartSpline
 		return parent[arm] < 0 ? NO_GRIP : new int[]{tool, hand, arm};
 	}
 
-	/** A point turned by spin about anchor, then moved with the anchor to moved. */
-	private static double[] carry(double[] spin, double[] anchor, double[] moved, double[] point)
+	/** A point (x, y, z) turned by spin about anchor, then moved with the anchor to moved; into out (not anchor or moved). */
+	private static void carry(double[] spin, double[] anchor, double[] moved, double x, double y, double z, double[] out)
 	{
-		double[] r = Quaternions.rotate(spin, point[0] - anchor[0], point[1] - anchor[1], point[2] - anchor[2]);
-		return new double[]{r[0] + moved[0], r[1] + moved[1], r[2] + moved[2]};
+		Quaternions.rotate(spin, x - anchor[0], y - anchor[1], z - anchor[2], out);
+		out[0] = out[0] + moved[0];
+		out[1] = out[1] + moved[1];
+		out[2] = out[2] + moved[2];
 	}
 
-	/** Where part p's vertices are in a pose, on average. */
-	private double[] centroid(float[] pose, int p)
+	/** Where part p's vertices are in a pose, on average; into out. */
+	private void centroid(float[] pose, int p, double[] out)
 	{
 		double cx = 0, cy = 0, cz = 0;
 		int[] own = members[p];
@@ -2299,7 +2454,9 @@ final class PartSpline
 			cy += pose[3 * v + 1];
 			cz += pose[3 * v + 2];
 		}
-		return new double[]{cx / own.length, cy / own.length, cz / own.length};
+		out[0] = cx / own.length;
+		out[1] = cy / own.length;
+		out[2] = cz / own.length;
 	}
 
 	/**
@@ -2334,9 +2491,15 @@ final class PartSpline
 		int next = Math.min(k + 1, keyframes - 1);
 		double s2 = s * s, s3 = s2 * s;
 		double h00 = 2 * s3 - 3 * s2 + 1, h10 = s3 - 2 * s2 + s, h01 = -2 * s3 + 3 * s2, h11 = s3 - s2;
-		double[][] q = new double[parts][];
-		double[][] m = new double[parts][];
-		double[][] c = new double[parts][];
+		// per part (where posed) its turn, stretch and centre
+		Scratch work = scratch.get();
+		work.parts(parts);
+		double[][] q = work.turn;
+		double[][] m = work.stretch;
+		double[][] c = work.centre;
+		boolean[] posed = work.posed;
+		java.util.Arrays.fill(posed, false);
+		double[] spin = work.spin, centre = work.middle, off = work.off, step = work.step, r = work.r;
 		int length = lengths[k];
 		for (int p : order)
 		{
@@ -2344,19 +2507,20 @@ final class PartSpline
 			{
 				// a part the action doesn't move, that a moving part hangs on or that carries vertices: where the client
 				// has it now
-				double[] found = measuredParts[p] ? measure(out, p) : null;
-				if (found == null)
+				double[] found = work.held;
+				if (!measuredParts[p] || !measure(out, p, found))
 				{
 					continue;
 				}
-				q[p] = new double[]{found[0], found[1], found[2], found[3]};
-				m[p] = new double[]{1, 0, 0, 0, 1, 0, 0, 0, 1};
-				c[p] = new double[]{found[4], found[5], found[6]};
+				System.arraycopy(found, 0, q[p], 0, 4);
+				java.util.Arrays.fill(m[p], 0);
+				m[p][0] = 1;
+				m[p][4] = 1;
+				m[p][8] = 1;
+				System.arraycopy(found, 4, c[p], 0, 3);
+				posed[p] = true;
 				continue;
 			}
-			double[] spin = new double[3];
-			double[] centre = new double[3];
-			double[] off = new double[3];
 			for (int axis = 0; axis < 3; axis++)
 			{
 				spin[axis] = s == 0 ? 0 : h10 * length * spinOut[k][p][axis] + h01 * turn[k][p][axis] + h11 * length * spinIn[next][p][axis];
@@ -2366,29 +2530,35 @@ final class PartSpline
 					+ h11 * length * offsetIn[next][p][axis];
 			}
 			// stretch eases from one keyframe's to the next's, never past either
-			m[p] = new double[9];
 			for (int e = 0; e < 9; e++)
 			{
 				m[p][e] = h00 * fit.stretch[k][p][e] + h01 * fit.stretch[next][p][e];
 			}
-			q[p] = Quaternions.multiply(Quaternions.exp(spin), fit.rotation[k][p]);
+			Quaternions.exp(spin[0], spin[1], spin[2], step);
+			Quaternions.multiply(step, fit.rotation[k][p], q[p]);
+			posed[p] = true;
 			int up = parent[p];
-			if (up >= 0 && q[up] != null)
+			if (up >= 0 && posed[up])
 			{
 				// hangs on its parent: the joint point goes where the parent carries it
 				double[] c0 = fit.centre[0][up];
 				double x = pivot[p][0] - c0[0], y = pivot[p][1] - c0[1], z = pivot[p][2] - c0[2];
 				double[] mu = m[up];
-				double[] r = Quaternions.rotate(q[up], mu[0] * x + mu[1] * y + mu[2] * z, mu[3] * x + mu[4] * y + mu[5] * z,
-					mu[6] * x + mu[7] * y + mu[8] * z);
-				double[] where = {r[0] + c[up][0], r[1] + c[up][1], r[2] + c[up][2]};
-				double[] carried = carried(p, q[p], m[p], where);
-				double[] turned = Quaternions.rotate(q[up], off[0], off[1], off[2]);
-				c[p] = new double[]{carried[0] + turned[0], carried[1] + turned[1], carried[2] + turned[2]};
+				Quaternions.rotate(q[up], mu[0] * x + mu[1] * y + mu[2] * z, mu[3] * x + mu[4] * y + mu[5] * z,
+					mu[6] * x + mu[7] * y + mu[8] * z, r);
+				double[] where = work.where, carried = work.carried, turned = work.turned;
+				where[0] = r[0] + c[up][0];
+				where[1] = r[1] + c[up][1];
+				where[2] = r[2] + c[up][2];
+				carried(p, q[p], m[p], where, carried);
+				Quaternions.rotate(q[up], off[0], off[1], off[2], turned);
+				c[p][0] = carried[0] + turned[0];
+				c[p][1] = carried[1] + turned[1];
+				c[p][2] = carried[2] + turned[2];
 			}
 			else
 			{
-				c[p] = centre;
+				System.arraycopy(centre, 0, c[p], 0, 3);
 			}
 		}
 		// where the parts go now, with what the fit misses of the keyframes blended back in
@@ -2402,7 +2572,7 @@ final class PartSpline
 		for (int v = 0; v < vertices; v++)
 		{
 			int p = partOf[v];
-			if (p < 0 || q[p] == null)
+			if (p < 0 || !posed[p])
 			{
 				continue;
 			}
@@ -2410,8 +2580,8 @@ final class PartSpline
 			double ry = fit.rest[3 * v + 1] + w0 * residual[k][3 * v + 1] + w1 * residual[next][3 * v + 1];
 			double rz = fit.rest[3 * v + 2] + w0 * residual[k][3 * v + 2] + w1 * residual[next][3 * v + 2];
 			double[] s9 = m[p];
-			double[] r = Quaternions.rotate(q[p], s9[0] * rx + s9[1] * ry + s9[2] * rz, s9[3] * rx + s9[4] * ry + s9[5] * rz,
-				s9[6] * rx + s9[7] * ry + s9[8] * rz);
+			Quaternions.rotate(q[p], s9[0] * rx + s9[1] * ry + s9[2] * rz, s9[3] * rx + s9[4] * ry + s9[5] * rz,
+				s9[6] * rx + s9[7] * ry + s9[8] * rz, r);
 			placed[3 * v] = (float) (r[0] + c[p][0]);
 			placed[3 * v + 1] = (float) (r[1] + c[p][1]);
 			placed[3 * v + 2] = (float) (r[2] + c[p][2]);
@@ -2420,12 +2590,11 @@ final class PartSpline
 		for (int v = 0; v < vertices; v++)
 		{
 			int p = follows[v];
-			if (p < 0 || q[p] == null || quiet[v] && !standing)
+			if (p < 0 || !posed[p] || quiet[v] && !standing)
 			{
 				continue;
 			}
 			int pc = pieceOf[v];
-			double[] spin = new double[3], centre = new double[3];
 			for (int axis = 0; axis < 3; axis++)
 			{
 				spin[axis] = s == 0 ? 0 : h10 * length * pieceSpinOut[k][pc][axis] + h01 * pieceTurn[k][pc][axis]
@@ -2433,15 +2602,16 @@ final class PartSpline
 				centre[axis] = h00 * pieceCentre[k][pc][axis] + h10 * length * pieceMoveOut[k][pc][axis]
 					+ h01 * pieceCentre[next][pc][axis] + h11 * length * pieceMoveIn[next][pc][axis];
 			}
-			double[] turned = Quaternions.rotate(Quaternions.multiply(Quaternions.exp(spin), pieceRotation[k][pc]),
-				pieceRest[3 * v], pieceRest[3 * v + 1], pieceRest[3 * v + 2]);
-			double[] local = new double[3];
+			double[] piece = work.piece, turned = work.turned, local = work.local;
+			Quaternions.exp(spin[0], spin[1], spin[2], step);
+			Quaternions.multiply(step, pieceRotation[k][pc], piece);
+			Quaternions.rotate(piece, pieceRest[3 * v], pieceRest[3 * v + 1], pieceRest[3 * v + 2], turned);
 			for (int axis = 0; axis < 3; axis++)
 			{
 				int i = 3 * v + axis;
 				local[axis] = turned[axis] + centre[axis] + h00 * pieceBend[k][i] + h01 * pieceBend[next][i];
 			}
-			double[] r = Quaternions.rotate(q[p], local[0], local[1], local[2]);
+			Quaternions.rotate(q[p], local[0], local[1], local[2], r);
 			out[3 * v] = (float) (r[0] + c[p][0]);
 			out[3 * v + 1] = (float) (r[1] + c[p][1]);
 			out[3 * v + 2] = (float) (r[2] + c[p][2]);
@@ -2455,12 +2625,13 @@ final class PartSpline
 				out[3 * v + 2] = placed[3 * v + 2];
 			}
 		}
-		double[] held = tied.length > 0 ? measure(out, tieOn) : null;
-		if (held != null && tieStub.length > 0)
+		double[] held = work.held;
+		if (tied.length > 0 && measure(out, tieOn, held) && tieStub.length > 0)
 		{
 			// the head's stub of rope stays where it lies in the hand that holds it: the head, whole, moved over by what
 			// its own way round misses of that
-			double[] stub = new double[3];
+			double[] stub = work.stub;
+			java.util.Arrays.fill(stub, 0);
 			for (int v : tieStub)
 			{
 				for (int axis = 0; axis < 3; axis++)
@@ -2468,8 +2639,9 @@ final class PartSpline
 					stub[axis] += (double) out[3 * v + axis] / tieStub.length;
 				}
 			}
-			double[] lies = Quaternions.rotate(held, h00 * stubAt[k][0] + h01 * stubAt[next][0], h00 * stubAt[k][1] + h01 * stubAt[next][1],
-				h00 * stubAt[k][2] + h01 * stubAt[next][2]);
+			double[] lies = r;
+			Quaternions.rotate(held, h00 * stubAt[k][0] + h01 * stubAt[next][0], h00 * stubAt[k][1] + h01 * stubAt[next][1],
+				h00 * stubAt[k][2] + h01 * stubAt[next][2], lies);
 			int part = partOf[tieStub[0]];
 			for (int v : members[part])
 			{
@@ -2542,21 +2714,24 @@ final class PartSpline
 			return;
 		}
 		int fixed = 1, base = ropeFirst;
-		double[] held = measure(out, base);
-		if (held == null)
+		Scratch work = scratch.get();
+		double[] held = work.ropeHeld;
+		boolean found = measure(out, base, held);
+		if (!found)
 		{
 			// a first link too small to tell how it is turned: the rope starts where what it hangs on has its joint
 			fixed = 0;
 			base = parent[ropeFirst];
-			held = base >= 0 ? measure(out, base) : null;
+			found = base >= 0 && measure(out, base, held);
 		}
 		int links = n - fixed;
-		if (held == null || links < 1)
+		if (!found || links < 1)
 		{
 			return;
 		}
 		double[] c0 = fit.centre[0][base];
-		double[] r = Quaternions.rotate(held, ropeNode[fixed][0] - c0[0], ropeNode[fixed][1] - c0[1], ropeNode[fixed][2] - c0[2]);
+		double[] r = work.ropeR;
+		Quaternions.rotate(held, ropeNode[fixed][0] - c0[0], ropeNode[fixed][1] - c0[1], ropeNode[fixed][2] - c0[2], r);
 		double[] from = {held[4] + r[0], held[5] + r[1], held[6] + r[2]}, to = new double[3], bulk = new double[3];
 		for (int v : ropeHold)
 		{
@@ -2628,13 +2803,17 @@ final class PartSpline
 		side = new double[]{side[0] / norm, side[1] / norm, side[2] / norm};
 		// the chain's shape: a catenary this long between ends this far apart (sinh(z) / z = length / apart, by halving)
 		double span = Math.min(length, Math.max(apart, ROPE_NARROW * length)), ratio = length / span;
-		double[][] now = new double[links + 1][];
+		// the chain's joints, each its own array (from and to are copied in, never shared)
+		work.links(n);
+		double[][] now = work.joints;
 		if (ratio < 1 + 1e-7)
 		{
 			for (int i = 0; i <= links; i++)
 			{
 				double far = along[i] / length * Math.min(apart, length);
-				now[i] = new double[]{from[0] + far * way[0], from[1] + far * way[1], from[2] + far * way[2]};
+				now[i][0] = from[0] + far * way[0];
+				now[i][1] = from[1] + far * way[1];
+				now[i][2] = from[2] + far * way[2];
 			}
 		}
 		else
@@ -2661,38 +2840,45 @@ final class PartSpline
 			{
 				double s = along[i] - length / 2, x = a * Math.log(s / a + Math.sqrt(s * s / (a * a) + 1)) * apart / span;
 				double sag = top - Math.sqrt(a * a + s * s);
-				now[i] = new double[]{(from[0] + to[0]) / 2 + x * way[0] + sag * side[0], (from[1] + to[1]) / 2 + x * way[1] + sag * side[1],
-					(from[2] + to[2]) / 2 + x * way[2] + sag * side[2]};
+				now[i][0] = (from[0] + to[0]) / 2 + x * way[0] + sag * side[0];
+				now[i][1] = (from[1] + to[1]) / 2 + x * way[1] + sag * side[1];
+				now[i][2] = (from[2] + to[2]) / 2 + x * way[2] + sag * side[2];
 			}
 		}
 		// the links back to their lengths: from the tip and from the start in turn until both ends hold
 		for (int round = 0; ; round++)
 		{
-			now[0] = from;
+			System.arraycopy(from, 0, now[0], 0, 3);
 			for (int i = 0; i < links; i++)
 			{
-				now[i + 1] = towards(now[i], now[i + 1], reach[i]);
+				towards(now[i], now[i + 1], reach[i], now[i + 1]);
 			}
 			if (round == ROPE_ROUNDS || sq(now[links][0] - to[0]) + sq(now[links][1] - to[1]) + sq(now[links][2] - to[2]) < ROPE_CLOSE * ROPE_CLOSE)
 			{
 				break;
 			}
-			now[links] = to;
+			System.arraycopy(to, 0, now[links], 0, 3);
 			for (int i = links - 1; i > 0; i--)
 			{
-				now[i] = towards(now[i + 1], now[i], reach[i]);
+				towards(now[i + 1], now[i], reach[i], now[i]);
 			}
 		}
 		// each link whole on its two joints, turned the short way from the link before it
-		double[] turn = {held[0], held[1], held[2], held[3]};
-		double[][] turns = new double[n][];
+		double[] turn = held;
+		double[][] turns = work.turns;
+		double[] was = work.was, dir = work.dir, bend = work.bend;
 		for (int i = 0; i < links; i++)
 		{
 			double[] a = ropeNode[fixed + i], b = ropeNode[fixed + i + 1];
-			double[] was = Quaternions.rotate(turn, b[0] - a[0], b[1] - a[1], b[2] - a[2]);
-			turn = Quaternions.multiply(between(was, new double[]{now[i + 1][0] - now[i][0], now[i + 1][1] - now[i][1], now[i + 1][2] - now[i][2]}), turn);
-			turns[fixed + i] = turn;
+			Quaternions.rotate(turn, b[0] - a[0], b[1] - a[1], b[2] - a[2], was);
+			dir[0] = now[i + 1][0] - now[i][0];
+			dir[1] = now[i + 1][1] - now[i][1];
+			dir[2] = now[i + 1][2] - now[i][2];
+			between(was, dir, bend);
+			Quaternions.multiply(bend, turn, turns[fixed + i]);
+			turn = turns[fixed + i];
 		}
+		double[] moved = work.ropeMoved;
 		for (int i = 0; i < tied.length; i++)
 		{
 			int link = ropeLinkOf[i], v = tied[i];
@@ -2701,33 +2887,51 @@ final class PartSpline
 				continue;
 			}
 			double[] a = ropeNode[link], at = now[link - fixed];
-			double[] moved = Quaternions.rotate(turns[link], keys[0][3 * v] - a[0], keys[0][3 * v + 1] - a[1], keys[0][3 * v + 2] - a[2]);
+			Quaternions.rotate(turns[link], keys[0][3 * v] - a[0], keys[0][3 * v + 1] - a[1], keys[0][3 * v + 2] - a[2], moved);
 			out[3 * v] = (float) (at[0] + moved[0]);
 			out[3 * v + 1] = (float) (at[1] + moved[1]);
 			out[3 * v + 2] = (float) (at[2] + moved[2]);
 		}
 	}
 
-	/** The shortest turn (w, x, y, z) that points one direction the way of another; none for a direction of no length. */
-	private static double[] between(double[] d, double[] e)
+	/**
+	 * The shortest turn (w, x, y, z) that points one direction the way of another, into out; none for a direction of no
+	 * length.
+	 */
+	private static void between(double[] d, double[] e, double[] out)
 	{
 		double dl = Math.sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]), el = Math.sqrt(e[0] * e[0] + e[1] * e[1] + e[2] * e[2]);
-		if (dl < 1e-6 || el < 1e-6)
+		double w = 0, x = 0, y = 0, z = 0, norm = 0;
+		if (dl >= 1e-6 && el >= 1e-6)
 		{
-			return new double[]{1, 0, 0, 0};
+			w = 1 + (d[0] * e[0] + d[1] * e[1] + d[2] * e[2]) / (dl * el);
+			x = (d[1] * e[2] - d[2] * e[1]) / (dl * el);
+			y = (d[2] * e[0] - d[0] * e[2]) / (dl * el);
+			z = (d[0] * e[1] - d[1] * e[0]) / (dl * el);
+			norm = Math.sqrt(w * w + x * x + y * y + z * z);
 		}
-		double w = 1 + (d[0] * e[0] + d[1] * e[1] + d[2] * e[2]) / (dl * el);
-		double x = (d[1] * e[2] - d[2] * e[1]) / (dl * el), y = (d[2] * e[0] - d[0] * e[2]) / (dl * el), z = (d[0] * e[1] - d[1] * e[0]) / (dl * el);
-		double norm = Math.sqrt(w * w + x * x + y * y + z * z);
-		return w < 1e-6 ? new double[]{1, 0, 0, 0} : new double[]{w / norm, x / norm, y / norm, z / norm};
+		if (dl < 1e-6 || el < 1e-6 || w < 1e-6)
+		{
+			out[0] = 1;
+			out[1] = 0;
+			out[2] = 0;
+			out[3] = 0;
+			return;
+		}
+		out[0] = w / norm;
+		out[1] = x / norm;
+		out[2] = y / norm;
+		out[3] = z / norm;
 	}
 
-	/** The point this far from a point, towards another. */
-	private static double[] towards(double[] from, double[] to, double far)
+	/** The point this far from a point, towards another; into out (which may be to, not from). */
+	private static void towards(double[] from, double[] to, double far, double[] out)
 	{
 		double x = to[0] - from[0], y = to[1] - from[1], z = to[2] - from[2], length = Math.sqrt(x * x + y * y + z * z);
 		double scale = length > 1e-9 ? far / length : 0;
-		return new double[]{from[0] + scale * x, from[1] + scale * y, from[2] + scale * z};
+		out[0] = from[0] + scale * x;
+		out[1] = from[1] + scale * y;
+		out[2] = from[2] + scale * z;
 	}
 
 	/** A tie (see tie) is between parts at least this many joints apart along the tree. */
@@ -3193,14 +3397,21 @@ final class PartSpline
 			return;
 		}
 		int part = partOf[head[0]];
-		double[] now = measure(out, part), then = measure(keys[k + 1], part);
-		if (now == null || then == null)
+		Scratch work = scratch.get();
+		double[] now = work.flingNow, then = work.flingThen;
+		if (!measure(out, part, now) || !measure(keys[k + 1], part, then))
 		{
 			return;
 		}
-		double[] turned = Quaternions.multiply(now, Quaternions.conjugate(then));
+		double[] back = work.flingBack, turned = work.flingTurn;
+		back[0] = then[0];
+		back[1] = -then[1];
+		back[2] = -then[2];
+		back[3] = -then[3];
+		Quaternions.multiply(now, back, turned);
 		int[] held = headHeld();
-		double[] shift = new double[3];
+		double[] shift = work.flingShift, on = work.flingOn;
+		java.util.Arrays.fill(shift, 0);
 		for (int v : held)
 		{
 			for (int axis = 0; axis < 3; axis++)
@@ -3210,8 +3421,8 @@ final class PartSpline
 		}
 		for (int v : members[part])
 		{
-			double[] on = Quaternions.rotate(turned, e * (keys[k + 1][3 * v] - keys[k][3 * v] - shift[0]),
-				e * (keys[k + 1][3 * v + 1] - keys[k][3 * v + 1] - shift[1]), e * (keys[k + 1][3 * v + 2] - keys[k][3 * v + 2] - shift[2]));
+			Quaternions.rotate(turned, e * (keys[k + 1][3 * v] - keys[k][3 * v] - shift[0]),
+				e * (keys[k + 1][3 * v + 1] - keys[k][3 * v + 1] - shift[1]), e * (keys[k + 1][3 * v + 2] - keys[k][3 * v + 2] - shift[2]), on);
 			for (int axis = 0; axis < 3; axis++)
 			{
 				out[3 * v + axis] += (float) on[axis];

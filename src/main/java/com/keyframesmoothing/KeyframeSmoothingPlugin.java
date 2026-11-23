@@ -182,7 +182,7 @@ public class KeyframeSmoothingPlugin extends Plugin
 	/** Being worked out off the client thread, or failed: not started again. */
 	private final Set<Long> learning = new HashSet<>();
 	/** Animations on a model that could not be worked out, and why (left to the client); tries so far of the others. */
-	private final Map<Long, String> unworkable = new HashMap<>();
+	final Map<Long, String> unworkable = new HashMap<>();
 	private final Map<Long, Integer> tries = new HashMap<>();
 	private int triesThisFrame;
 	/** Worked out ahead of their first play (see workAhead): not yet checked against the keyframe the client shows. */
@@ -193,12 +193,6 @@ public class KeyframeSmoothingPlugin extends Plugin
 	private long aheadLook = Long.MIN_VALUE;
 	private final ArrayDeque<Integer> ahead = new ArrayDeque<>();
 	private int aheadWaits;
-	/**
-	 * What working animations out costs (nanoseconds; last and worst): on the client thread in a frame
-	 * (the poses), off it (the spline), and from an animation's first frame until it is drawn along its spline.
-	 */
-	private long workNanos;
-	volatile long posesNanosLast, posesNanosWorst, splineNanosLast, splineNanosWorst, readyNanosLast, readyNanosWorst;
 	private Poses poses;
 	private volatile long lastTickNanos;
 	/**
@@ -957,7 +951,6 @@ public class KeyframeSmoothingPlugin extends Plugin
 		installHook();
 		votes = new HashMap<>();
 		triesThisFrame = 0;
-		workNanos = 0;
 		local = client.getLocalPlayer();
 		WorldView top = client.getTopLevelWorldView();
 		if (top != null)
@@ -973,11 +966,6 @@ public class KeyframeSmoothingPlugin extends Plugin
 				decide(worldView, localAnimation);
 			}
 			workAhead();
-		}
-		if (workNanos > 0)
-		{
-			posesNanosLast = workNanos;
-			posesNanosWorst = Math.max(posesNanosWorst, workNanos);
 		}
 		Settings now = settings;
 		snapshot = new Snapshot(majority(votes), majority(decideEffects(top)), now.objects, objectExceptions);
@@ -1381,15 +1369,7 @@ public class KeyframeSmoothingPlugin extends Plugin
 		}
 		track.triedCycle = track.startCycle;
 		triesThisFrame++;
-		long started = System.nanoTime();
-		try
-		{
-			workOut(actor, track, lengths);
-		}
-		finally
-		{
-			workNanos += System.nanoTime() - started;
-		}
+		workOut(actor, track, lengths);
 	}
 
 	/** Whether nothing is left to do for an animation on a model: worked out and checked, being worked out, or left to the client. */
@@ -1492,36 +1472,28 @@ public class KeyframeSmoothingPlugin extends Plugin
 		{
 			return;
 		}
-		long started = System.nanoTime();
-		try
+		long shape = poses.shapeAhead(local, next);
+		if (shape == 0)
 		{
-			long shape = poses.shapeAhead(local, next);
-			if (shape == 0)
+			if (poses.missing() && aheadWaits++ < AHEAD_WAITS)
 			{
-				if (poses.missing() && aheadWaits++ < AHEAD_WAITS)
-				{
-					ahead.add(next);
-				}
-				return;
+				ahead.add(next);
 			}
-			long key = key(next, shape);
-			if (learnt.containsKey(key) || learning.contains(key) || unworkable.containsKey(key))
-			{
-				return;
-			}
-			Learning.Lesson lesson = poses.ahead(local, next, lengths);
-			if (lesson == null)
-			{
-				return;
-			}
-			lesson.yours = true;
-			unchecked.add(key);
-			finish(key, lesson);
+			return;
 		}
-		finally
+		long key = key(next, shape);
+		if (learnt.containsKey(key) || learning.contains(key) || unworkable.containsKey(key))
 		{
-			workNanos += System.nanoTime() - started;
+			return;
 		}
+		Learning.Lesson lesson = poses.ahead(local, next, lengths);
+		if (lesson == null)
+		{
+			return;
+		}
+		lesson.yours = true;
+		unchecked.add(key);
+		finish(key, lesson);
 	}
 
 	/** An action the local player plays with the weapon worn: worked out ahead from now on (see workAhead), also next session. */
@@ -1593,12 +1565,6 @@ public class KeyframeSmoothingPlugin extends Plugin
 		return known;
 	}
 
-	/** Why an animation on a model is left to the client (see work), or null. */
-	String unworkable(int animationId, long shape)
-	{
-		return unworkable.get(key(animationId, shape));
-	}
-
 	/** Makes a lesson's spline (see Learning.learn), off the client thread. */
 	private void finish(long key, Learning.Lesson lesson)
 	{
@@ -1607,16 +1573,12 @@ public class KeyframeSmoothingPlugin extends Plugin
 			return;
 		}
 		learning.add(key);
-		long asked = System.nanoTime();
 		learner.execute(() ->
 		{
 			Thread.currentThread().setPriority(Thread.MIN_PRIORITY);
 			try
 			{
-				long started = System.nanoTime();
 				Learning.Learnt result = Learning.learn(lesson);
-				splineNanosLast = System.nanoTime() - started;
-				splineNanosWorst = Math.max(splineNanosWorst, splineNanosLast);
 				clientThread.invokeLater(() ->
 				{
 					learning.remove(key);
@@ -1625,8 +1587,6 @@ public class KeyframeSmoothingPlugin extends Plugin
 						// worked out ahead, and found not to be what the client draws meanwhile
 						return;
 					}
-					readyNanosLast = System.nanoTime() - asked;
-					readyNanosWorst = Math.max(readyNanosWorst, readyNanosLast);
 					Learning.Learnt before = learnt.put(key, result);
 					learntBytes += result.bytes - (before == null ? 0 : before.bytes);
 					if (lesson.yours)
@@ -1853,7 +1813,7 @@ public class KeyframeSmoothingPlugin extends Plugin
 		return animations.get(animationId);
 	}
 
-	private static long key(int animationId, long shape)
+	static long key(int animationId, long shape)
 	{
 		return shape * 0x9E3779B97F4A7C15L + animationId;
 	}

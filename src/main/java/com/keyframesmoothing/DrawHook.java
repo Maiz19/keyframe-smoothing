@@ -29,11 +29,6 @@ final class DrawHook implements DrawCallbacks
 	/** Calls since the plugin last looked: a hook that gets none in the world is no longer in front of the renderer. */
 	volatile int calls;
 
-	DrawHook(DrawCallbacks delegate, ActorDrawer drawer)
-	{
-		this(delegate, drawer, null);
-	}
-
 	DrawHook(DrawCallbacks delegate, ActorDrawer drawer, ObjectDrawer objects)
 	{
 		this.delegate = delegate;

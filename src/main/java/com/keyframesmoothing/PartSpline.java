@@ -40,27 +40,27 @@ final class PartSpline
 	final int vertices;
 	private final float[][] keys;
 	/** Keyframe steps the spline breaks a rule in (see Rules): left to the client. Until checked, all are. */
-	private final boolean[] fallback;
+	final boolean[] fallback;
 	/** Vertex pairs for the rules: within a part, and touching across parts (keyframe 0). */
-	private final int[][] samePairs, nearPairs;
+	final int[][] samePairs, nearPairs;
 	/** Part of each vertex, or -1: left to the client. */
 	final int[] partOf;
 	/**
 	 * For a vertex in no part that can be fitted (a whip's lash, stretched and bent): the moving part that carries it
 	 * best, else -1. Such a vertex is blended in that part's frame, so it stays on it.
 	 */
-	private final int[] follows;
+	final int[] follows;
 	/**
 	 * Carried vertices of parts that hardly move in the action (near a joint, or legs while standing): carried only while
 	 * the character stands still, as walking moves them with the walk.
 	 */
-	private final boolean[] quiet;
+	final boolean[] quiet;
 	/**
 	 * Carried pieces (each turns as a whole in its carrier's frame, and bends on top): per vertex its piece and place in
 	 * the piece at keyframe 0 (relative to the piece's centre, carrier frame); per keyframe and piece the turn, centre and
 	 * speeds; per keyframe what the turn misses of each vertex (the bending), eased between keyframes.
 	 */
-	private final int[] pieceOf;
+	final int[] pieceOf;
 	private final float[] pieceRest;
 	private final double[][][] pieceRotation, pieceCentre, pieceTurn, pieceSpinOut, pieceSpinIn, pieceMoveOut, pieceMoveIn;
 	private final float[][] pieceBend;
@@ -70,20 +70,20 @@ final class PartSpline
 	/** The model's height in keyframe 0. */
 	private final double height;
 	private final int[] lengths;
-	private final Fit fit;
+	final Fit fit;
 	/** Every vertex's part, also of parts left to the client (they can still carry a part that moves). */
-	private final int[] group;
+	final int[] group;
 	/** Per part, its vertices (by group). */
 	private final int[][] members;
 	/** Parts left to the client that pose() measures: a moving part hangs on them, or they carry vertices. */
 	private final boolean[] measuredParts;
 	/** Where pose() puts the parts' vertices before writing them out; reused, per thread (objects are drawn on render threads). */
 	private final ThreadLocal<float[][]> placing = ThreadLocal.withInitial(() -> new float[][]{new float[0]});
-	private final boolean[] driven;
+	final boolean[] driven;
 	/** The joint tree: each part's parent (-1 for a root), the joint point (keyframe 0 coordinates), and the order to place them. */
-	private final int[] parent;
+	final int[] parent;
 	private final double[][] pivot;
-	private final int[] order;
+	final int[] order;
 	/** Per keyframe and part: what the joint misses of the fitted centre, and its speeds, so keyframes are met exactly. */
 	private final double[][][] offset, offsetOut, offsetIn;
 	/** Per keyframe: what the fitted parts miss of each vertex (x, y, z, ...), blended in so keyframes are met exactly. */
@@ -1077,18 +1077,6 @@ final class PartSpline
 			return true;
 		}
 
-		/** For checks: each twist as part, keyframes it is spread over, degrees. */
-		String describe()
-		{
-			StringBuilder sb = new StringBuilder();
-			for (Twist t : twists)
-			{
-				sb.append(String.format("part %d (from part %d): %d->%d %.0f degrees, %d vertices; ", t.part, t.root, t.from,
-					t.step + 1, Math.toDegrees(Math.abs(t.angle)), t.turned.length));
-			}
-			return sb.toString();
-		}
-
 		/**
 		 * A pose of step k, s of the way, with the twists turned as far as they are spread there (in a twisting step
 		 * only at its start, its keyframe).
@@ -1550,101 +1538,7 @@ final class PartSpline
 	}
 
 	/** How pieces that don't move as one were split, for checking. */
-	private final StringBuilder splits = new StringBuilder();
-
-	/** The joint tree, for checking: part (size, moved or not) <- parent. */
-	String describe()
-	{
-		StringBuilder sb = new StringBuilder(splits);
-		for (int p : order)
-		{
-			sb.append(String.format("  part %d (%d vertices%s) <- %s%n", p, fit.members[p], driven[p] ? ", moved" : "",
-				parent[p] < 0 ? "root" : String.valueOf(parent[p])));
-		}
-		return sb.toString();
-	}
-
-	/** For checks: the turn (w, x, y, z) of part p in a pose, fitted to its rest shape; null for a part too small. */
-	double[] turnOf(float[] pose, int p)
-	{
-		double[] measured = measure(pose, p);
-		return measured == null ? null : java.util.Arrays.copyOf(measured, 4);
-	}
-
-	/** For checks: the vertex pairs the rules look at (rigid ones, touching ones). */
-	int[][] samePairs()
-	{
-		return samePairs;
-	}
-
-	int[][] nearPairs()
-	{
-		return nearPairs;
-	}
-
-	/** For checks: the spline's pose also where the step is left to the client. Not for use while drawing. */
-	void poseUnchecked(float[] out, int k, double s)
-	{
-		boolean left = k < fallback.length && fallback[k];
-		if (left)
-		{
-			fallback[k] = false;
-		}
-		try
-		{
-			pose(out, k, s);
-		}
-		finally
-		{
-			if (left)
-			{
-				fallback[k] = true;
-			}
-		}
-	}
-
-	/** For checks: how a vertex is placed (its part, carrier, piece and piece size, quiet). */
-	String explain(int v)
-	{
-		int pc = pieceOf[v];
-		int size = 0;
-		for (int u = 0; u < vertices; u++)
-		{
-			size += pc >= 0 && pieceOf[u] == pc ? 1 : 0;
-		}
-		int carrier = follows[v];
-		return String.format("vertex %d: part %d, group %d, carrier %d (driven %s, parent %d), piece %d of %d, quiet %s", v, partOf[v],
-			group[v], carrier, carrier >= 0 && driven[carrier], carrier >= 0 ? parent[carrier] : -9, pc, size, quiet[v]);
-	}
-
-	/** For checks: a part's parent in the joint tree (-1 for a root). */
-	int parentOf(int p)
-	{
-		return parent[p];
-	}
-
-	/** For checks: whether part p is moved by the spline, and its size in vertices. */
-	boolean moves(int p)
-	{
-		return driven[p];
-	}
-
-	int size(int p)
-	{
-		return fit.members[p];
-	}
-
-	/** Every vertex's part, also of parts left to the client. */
-	int groupOf(int v)
-	{
-		return group[v];
-	}
-
-	/** The part carrying a vertex that is in no fitted part, or -1. */
-	int carrierOf(int v)
-	{
-		return follows[v];
-	}
+	final StringBuilder splits = new StringBuilder();
 
 	/**
 	 * A point in a carrier's frame at keyframe k: its turn and centre only. A carried piece is geometry of its own: it
@@ -1728,7 +1622,7 @@ final class PartSpline
 	 * The turn and centre of part p where the client has it now (in pose), fitted to its rest shape:
 	 * {w, x, y, z, centre x, y, z}; null when the part has too few vertices.
 	 */
-	private double[] measure(float[] pose, int p)
+	double[] measure(float[] pose, int p)
 	{
 		if (fit.members[p] < 3)
 		{
@@ -3694,7 +3588,7 @@ final class PartSpline
 	}
 
 	/** Turn, stretch and centre of groups of vertices per keyframe, fitted to the keyframe poses (keyframe 0 is rest). */
-	private static final class Fit
+	static final class Fit
 	{
 		final float[][] keys;
 		final int[] group;

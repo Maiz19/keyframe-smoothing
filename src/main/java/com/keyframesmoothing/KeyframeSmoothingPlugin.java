@@ -1255,7 +1255,7 @@ public class KeyframeSmoothingPlugin extends Plugin
 		}
 		track.mode = mode;
 		track.standing = !track.action || actor.getPoseAnimation() == actor.getIdlePoseAnimation();
-		boolean blend = blends(track, mode, now);
+		boolean blend = actor instanceof NPC ? mode != Smoothing.OFF : blends(track, mode, now);
 		track.blend = blend;
 		if (track.animationId == localAnimation)
 		{
@@ -1271,12 +1271,16 @@ public class KeyframeSmoothingPlugin extends Plugin
 		return track.animationId;
 	}
 
-	/** The setting for the character's animation; the opposite for an NPC, or the weapon of an attack, on the exceptions. */
+	/**
+	 * The setting for the character's animation; the opposite for an NPC, or the weapon of an attack, on the exceptions. An
+	 * NPC that is smoothed is always PLAIN, blended at every keyframe; only players get KEYFRAMES.
+	 */
 	Smoothing mode(Actor actor, Track track, Settings now)
 	{
 		if (actor instanceof NPC)
 		{
-			return now.smoothNpcs != excepted(Lists.SMOOTH, (NPC) actor, now) ? Smoothing.KEYFRAMES : Smoothing.OFF;
+			// always the client's even blend: the keyframe logic made NPCs stutter
+			return now.smoothNpcs != excepted(Lists.SMOOTH, (NPC) actor, now) ? Smoothing.PLAIN : Smoothing.OFF;
 		}
 		boolean on = actor == local ? now.smoothMe : now.smoothPlayers;
 		if (track.attack)
